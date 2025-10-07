@@ -1,0 +1,317 @@
+---
+title: "Predictive Customer Churn Analysis for a Telecom Company"
+author: "Vedija Mangesh Jagtap"
+date: "2025-03-08"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Below are the steps followed to do the churn analysis:
+
+## Data Collection and Preprocessing
+
+**Loading Libraries**
+
+To perform the analysis, various R libraries for data manipulation, visualization, and modeling, including tidyverse, caret, randomForest, e1071, and gbm were utilized.
+
+```{r load-packages}
+# Load necessary libraries
+library(tidyverse)  # For data wrangling and visualization
+library(caret)  # For machine learning and model evaluation
+library(gbm)  # For Gradient Boosting Machine (GBM) model
+library(randomForest)  # For Random Forest model
+library(e1071)  # For Support Vector Machines (SVM)
+library(ROCR)  # For ROC curve analysis
+library(pROC)  # For AUC-ROC curve analysis
+library(rpart)  # For Decision Tree model
+library(corrplot)  # For correlation heatmaps
+```
+
+**Loading Data**
+
+Used two datasets: a training set (WA_Fn-UseC\_-Telco-Customer-Churn_R2.csv) and a test set (WA_Fn-UseC\_-Telco-Customer-Churn_R2_Test.csv).
+
+```{r load-data}
+# Load training and test datasets from CSV files
+train_data <- read.csv("WA_Fn-UseC_-Telco-Customer-Churn_R2.csv")
+test_data <- read.csv("WA_Fn-UseC_-Telco-Customer-Churn_R2_Test.csv")
+```
+
+**Data Cleaning**
+
+\- Categorical variables, such as Churn, are converted into factors.
+
+\- Missing values are checked and handled.
+
+\- Outliers are removed using the Interquartile Range (IQR) method.
+
+\- Categorical variables are encoded as factors for compatibility with modeling algorithms.
+
+```{r data-cleaning}
+# Convert categorical target variable 'Churn' to a factor type
+train_data$Churn <- as.factor(train_data$Churn)
+test_data$Churn <- as.factor(test_data$Churn)
+
+# Check for missing values
+colSums(is.na(train_data))
+colSums(is.na(test_data))
+
+# Identify numeric variables for outlier removal
+numeric_vars <- train_data |> select(where(is.numeric)) |> names()
+numeric_vars
+
+# Remove outliers using the IQR method
+for (var in numeric_vars) {
+  Q1 <- quantile(train_data[[var]], 0.25, na.rm = TRUE)
+  Q3 <- quantile(train_data[[var]], 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  train_data <- train_data |> filter(train_data[[var]] >= (Q1 - 1.5 * IQR) & train_data[[var]] <= (Q3 + 1.5 * IQR))
+}
+
+# Convert character-type categorical variables to factors
+train_data <- train_data |> mutate_if(is.character, as.factor)
+test_data <- test_data |> mutate_if(is.character, as.factor)
+```
+
+## Exploratory Data Analysis
+
+*Key Visualizations:*
+
+-   Churn Distribution: A bar chart shows the proportion of customers who churned.
+-   Churn by Contract Type: Stacked bar plots highlight differences in churn rates across contract types.
+-   Correlation Heatmap: Displays relationships between numerical variables.
+-   Scatter Plot of Monthly Charges vs. Total Charges: Identifies patterns related to churn.
+-   Tenure Distribution: Histogram showing tenure distribution across churn categories.
+
+```{r eda}
+# Churn Distribution
+ggplot(train_data, aes(x = Churn)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Churn Distribution", x = "Churn", y = "Count")
+
+# Churn by Contract Type
+ggplot(train_data, aes(x = Contract, fill = Churn)) +
+  geom_bar(position = "fill") +
+  labs(title = "Churn by Contract Type", x = "Contract Type", y = "Proportion")
+
+# Correlation Heatmap (for Numeric Features)
+numeric_cols <- names(train_data)[sapply(train_data, is.numeric)]
+cor_matrix <- cor(train_data[numeric_cols], use = "pairwise.complete.obs")
+corrplot(cor_matrix, method = "color", type = "upper", tl.col = "black", tl.srt = 45, main = "Correlation Heatmap")
+
+# Monthly Charges vs. Total Charges
+ggplot(train_data, aes(x = MonthlyCharges, y = TotalCharges, color = Churn)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Monthly Charges vs. Total Charges", x = "Monthly Charges", y = "Total Charges")
+
+# Tenure Distribution
+ggplot(train_data, aes(x = Tenure, fill = Churn)) +
+  geom_histogram(bins = 30, alpha = 0.7, position = "identity") +
+  labs(title = "Tenure Distribution", x = "Tenure (Months)", y = "Count")
+```
+
+## Feature Selection and Engineering
+
+To identify the most important features influencing churn, used a Random Forest model:
+
+\- Compute feature importance scores.
+
+\- Select the top 10 most important features.
+
+\- Subset the dataset to include only selected features along with the target variable Churn.
+
+```{r feature-engineering}
+# Train a Random Forest model to determine feature importance
+rf_model <- randomForest(Churn ~ ., data = train_data[, -which(names(train_data) == "customerID")], importance = TRUE)
+
+# Extract and sort feature importance scores
+importance <- importance(rf_model)
+importance_df <- data.frame(Feature = rownames(importance), Importance = importance[, 1])
+importance_df <- importance_df[order(-importance_df$Importance), ]
+head(importance_df, 10)
+
+# Select the top N most important features
+top_n <- 10 
+selected_features <- importance_df$Feature[1:top_n]
+selected_features
+
+# Subset train_data with only selected features + target variable
+train_data <- train_data |> select(all_of(selected_features), Churn)
+
+# Subset test_data with selected features
+test_data <- test_data |> select(all_of(selected_features), Churn)
+```
+
+## Model Building
+
+The dataset is split into training and validation sets (80%-20%). Evaluated five machine learning models listed below:
+
+```{r model-building}
+set.seed(123)
+# Split the training data into training and validation sets
+trainIndex <- createDataPartition(train_data$Churn, p = 0.8, list = FALSE)
+train_set <- train_data[trainIndex, ]
+valid_set <- train_data[-trainIndex, ]
+```
+
+## Logistic Regression
+
+-   A generalized linear model is used to predict churn probabilities.
+-   A confusion matrix assesses model performance.
+
+```{r}
+# Train a logistic regression model
+logit_model <- glm(Churn ~ ., data = train_set, family = binomial)
+
+# Make predictions on validation set
+logit_pred <- predict(logit_model, valid_set, type = "response")
+logit_pred_class <- ifelse(logit_pred > 0.5, 1, 0) # Convert probabilities to binary outcomes
+
+# Evaluate performance with confusion matrix
+logit_cm <- confusionMatrix(as.factor(logit_pred_class), valid_set$Churn)
+logit_cm
+
+```
+
+## Decision Trees
+
+-   A decision tree classifier is trained.
+-   Predictions are made and evaluated using accuracy metrics.
+
+```{r}
+# Train a decision tree model
+tree_model <- rpart(Churn ~ ., data = train_set, method = "class")
+
+# Make predictions on validation set
+tree_pred <- predict(tree_model, valid_set, type = "prob")[,2]
+tree_pred_class <- ifelse(tree_pred > 0.5, 1, 0) # Convert probabilities to binary outcomes
+
+# Evaluate model with Confusion Matrix
+tree_cm <- confusionMatrix(as.factor(tree_pred_class), valid_set$Churn) 
+tree_cm
+```
+
+## Random Forest
+
+-   An ensemble model with 100 trees is trained.
+-   The model's predictive performance is evaluated.
+
+```{r}
+# Train a random forest model
+rf_model <- randomForest(Churn ~ ., data = train_set, ntree = 100)
+
+# Make predictions
+rf_pred <- predict(rf_model, valid_set, type = "prob")[,2]
+rf_pred_class <- ifelse(rf_pred > 0.5, 1, 0) # Convert probabilities to binary outcomes
+rf_cm <- confusionMatrix(as.factor(rf_pred_class), valid_set$Churn) # Confusion Matrix
+rf_cm
+
+```
+
+## Support Vector Machine
+
+-   A radial kernel-based SVM model is trained.
+-   Probabilities are extracted and evaluated.
+
+```{r}
+# Train a Support Vector Machine model
+svm_model <- svm(Churn ~ ., data = train_set, kernel = "radial", probability = TRUE)
+
+# Make predictions
+svm_pred <- attr(predict(svm_model, valid_set, probability = TRUE), "probabilities")[,2]
+svm_pred_class <- ifelse(svm_pred > 0.5, 1, 0) # Convert probabilities to binary outcomes
+svm_cm <- confusionMatrix(as.factor(svm_pred_class), valid_set$Churn) # Confusion Matrix
+svm_cm
+
+```
+
+## Gradient Boosting Machine
+
+-   A GBM model is trained using 5-fold cross-validation.
+-   Predictions are generated and assessed.
+
+```{r}
+# Train a Gradient Boosting Machine model
+gbm_model <- train(Churn ~ ., data = train_set, method = "gbm", trControl = trainControl(method = "cv", number = 5), verbose = FALSE)
+
+# Make predictions
+gbm_pred <- predict(gbm_model, valid_set, type = "prob")[, 2]
+gbm_pred_class <- ifelse(gbm_pred > 0.5, 1, 0) # Convert probabilities to binary outcomes
+gbm_cm <- confusionMatrix(as.factor(gbm_pred_class), valid_set$Churn) # Confusion Matrix
+gbm_cm
+```
+
+## Model Evaluation
+
+Accuracy Comparison: A table is generated comparing the accuracy of all models.
+
+ROC Curves: Receiver Operating Characteristic (ROC) curves are plotted for all models to compare their performance in distinguishing churners from non-churners.
+
+```{r evaluation}
+# ROC Curves
+roc_logit <- roc(valid_set$Churn, logit_pred)
+roc_rf <- roc(valid_set$Churn, rf_pred)
+roc_gbm <- roc(valid_set$Churn, gbm_pred)
+roc_dt <- roc(valid_set$Churn, tree_pred)
+roc_svm <- roc(valid_set$Churn, svm_pred)
+
+# Plot ROC curves
+plot(roc_logit, col="blue", main="ROC Curves")
+lines(roc_rf, col="red")
+lines(roc_gbm, col="green")
+lines(roc_dt, col="purple")
+lines(roc_svm, col="orange")
+legend("bottomright", legend=c("Logistic Regression", "Random Forest", "GBM", "Decision Tree", "SVM"), col=c("blue", "red", "green", "purple", "orange"), lwd=2)
+
+# Combine accuracy and ROC AUC
+model_metrics <- data.frame(
+  Model = c("Logistic Regression", "Decision Tree", "Random Forest", "SVM", "Gradient Boosting"),
+  Accuracy = c(logit_cm$overall["Accuracy"], 
+               tree_cm$overall["Accuracy"], 
+               rf_cm$overall["Accuracy"], 
+               svm_cm$overall["Accuracy"],
+               gbm_cm$overall["Accuracy"]),
+  ROC_AUC = c(auc(roc_logit),
+              auc(roc_dt), 
+              auc(roc_rf), 
+              auc(roc_svm),
+              auc(roc_gbm))
+)
+
+# Display model performance
+print(model_metrics)
+```
+
+## Deployment and Recommendations
+
+-   The best-performing model (SVM) is selected for final predictions.
+-   The test dataset is used to generate churn predictions.
+
+```{r deployment}
+# Select the best model based on ROC AUC (or other criteria)
+best_model <- model_metrics$Model[which.max(model_metrics$ROC_AUC)]
+cat("Best Model Selected:", best_model)
+
+# Final Model Deployment (Based on Best Model Selection)
+final_model <- switch(best_model,
+                      "Logistic Regression" = logit_model,
+                      "Decision Tree" = tree_model,
+                      "Random Forest" = rf_model,
+                      "SVM" = svm_model,
+                      "Gradient Boosting" = gbm_model)
+
+# Generate Predictions
+final_predictions <- predict(final_model, test_data, type = "prob")
+
+# Classify Predictions
+final_predictions_class <- ifelse(final_predictions > 0.5, 1, 0)
+
+# Add predictions to test data
+test_data$PredictedChurn <- final_predictions_class
+head(test_data)
+```
